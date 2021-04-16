@@ -18,6 +18,7 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+// Move these to env vars
 const (
 	RedisAddr     = "localhost:6379"
 	RedisSub      = "websocket"
@@ -26,25 +27,30 @@ const (
 	BackendAddr   = "[put your staging env here]"
 )
 
+// SafeConnMap maps ids to channels with a mutex
 type SafeConnMap struct {
 	v  map[uint64]chan string
 	mu sync.Mutex
 }
 
+// SafeUserMap maps userids to slices of channels with a mutex
 type SafeUserMap struct {
 	v  map[uint32][]chan string
 	mu sync.Mutex
 }
 
+// AuthMe represents a packet sent from an authed goroutine, instructs main to reflect changes
 type AuthMe struct {
 	id     uint64
 	userid uint32
 }
 
+// Auth parses a JSON auth request from the client
 type Auth struct {
 	Token string
 }
 
+// MemberResponse parses the data from backend /member/self
 type MemberResponse struct {
 	S bool
 	D map[string]interface{}
@@ -56,6 +62,7 @@ func remove(s []chan string, i int) []chan string {
 	return s[:len(s)-1]
 }
 
+// GetUser queries the backend for a given token
 func GetUser(token string) (uint32, bool) {
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", BackendAddr+"member/self/", nil)
@@ -99,6 +106,7 @@ func clearuser(del chan string, users map[uint32][]chan string) {
 	}
 }
 
+// Redis makes a connection to Redis
 func Redis() <-chan *redis.Message {
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: RedisAddr,
@@ -121,6 +129,7 @@ func Redis() <-chan *redis.Message {
 	return topic.Channel()
 }
 
+// RunSocket runs as a goroutine for the length of the socket connection
 func RunSocket(ws *websocket.Conn, id uint64, unl *sync.Mutex, msgs <-chan string, authme chan<- AuthMe) (uint64, bool) {
 	unl.Unlock()
 	log.Println("New ws connection, id", id)
@@ -143,7 +152,7 @@ func RunSocket(ws *websocket.Conn, id uint64, unl *sync.Mutex, msgs <-chan strin
 	for {
 		select {
 		case msg := <-recv:
-			log.Printf("Recieved on %d: %s\n", id, msg)
+			log.Printf("Received on %d: %s\n", id, msg)
 			var auth Auth
 			err := json.Unmarshal([]byte(msg), &auth)
 			if err == nil { // Valid packet for auth was provided
