@@ -19,9 +19,7 @@ import (
 
 func listener() { // Serve HTTP
 	err := http.ListenAndServe(config.WebsocketAddr, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	log.Fatal(err)
 }
 
 func main() {
