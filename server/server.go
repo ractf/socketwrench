@@ -4,9 +4,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"syscall"
 
 	"github.com/gobwas/ws"
@@ -16,8 +18,9 @@ import (
 	"github.com/ractf/socketwrench/models"
 )
 
-var epoller *epoll
+var Epoller *epoll
 var authed map[uint32][]*net.Conn
+var authedmut sync.Mutex
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	// Upgrade connection
@@ -25,7 +28,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	if err := epoller.Add(conn); err != nil {
+	if err := Epoller.Add(conn); err != nil {
 		log.Printf("Failed to add connection %v", err)
 		conn.Close()
 	}
@@ -45,7 +48,7 @@ func Run() {
 
 	// Start epoll
 	var err error
-	epoller, err = MkEpoll()
+	Epoller, err = MkEpoll()
 	if err != nil {
 		panic(err)
 	}
@@ -62,7 +65,7 @@ func Run() {
 }
 
 func kill(conn net.Conn) {
-	if err := epoller.Remove(conn); err != nil {
+	if err := Epoller.Remove(conn); err != nil {
 		log.Printf("Failed to remove %v", err)
 	}
 	conn.Close()
@@ -77,20 +80,21 @@ func sendHandler() {
 		case 0: // Global message
 			send := []byte(packet[1:])
 			graveyard := make([]net.Conn, 0)
-			epoller.lock.RLock()
-			for _, conn := range epoller.connections {
+			Epoller.Lock.RLock()
+			for _, conn := range Epoller.Connections {
 				err := wsutil.WriteServerText(conn, send)
 				if err != nil {
 					graveyard = append(graveyard, conn)
 				}
 			}
-			epoller.lock.RUnlock()
+			Epoller.Lock.RUnlock()
 			for _, grave := range graveyard {
 				kill(grave)
 			}
 
 		case 1: // user message
 			usersend := binary.BigEndian.Uint32([]byte(packet[1:5]))
+			authedmut.Lock()
 			if conns, ok := authed[usersend]; ok {
 				for ind, conn := range conns {
 					err := wsutil.WriteServerText(*conn, []byte(packet[5:]))
@@ -104,15 +108,18 @@ func sendHandler() {
 					}
 				}
 			}
+			authedmut.Unlock()
 		}
 	}
 }
 
 func recvHandler() { // must run synchronously
 	for {
-		connections, err := epoller.Wait()
+		connections, err := Epoller.Wait()
 		if err != nil {
-			log.Printf("Failed to epoll wait %v", err)
+			if fmt.Sprint(err) != "interrupted system call" { // shit happens
+				log.Println(err)
+			}
 			continue
 		}
 		for _, conn := range connections {
@@ -131,12 +138,14 @@ func recvHandler() { // must run synchronously
 				user, ok := external.GetUser(auth.Token)
 				if ok {
 					log.Printf("Socket %p has authenticated as %d\n", conn, user)
+					authedmut.Lock()
 					if _, ok := authed[user]; ok { // if found
 						authed[user] = append(authed[user], &conn)
 					} else {
 						authed[user] = make([]*net.Conn, 1)
 						authed[user][0] = &conn
 					}
+					authedmut.Unlock()
 				}
 			} else {
 				log.Println(err)

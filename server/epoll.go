@@ -1,7 +1,6 @@
 package server
 
 import (
-	"log"
 	"net"
 	"reflect"
 	"sync"
@@ -12,8 +11,8 @@ import (
 
 type epoll struct {
 	fd          int
-	connections map[int]net.Conn
-	lock        *sync.RWMutex
+	Connections map[int]net.Conn
+	Lock        *sync.RWMutex
 }
 
 func MkEpoll() (*epoll, error) {
@@ -23,8 +22,8 @@ func MkEpoll() (*epoll, error) {
 	}
 	return &epoll{
 		fd:          fd,
-		lock:        &sync.RWMutex{},
-		connections: make(map[int]net.Conn),
+		Lock:        &sync.RWMutex{},
+		Connections: make(map[int]net.Conn),
 	}, nil
 }
 
@@ -35,12 +34,9 @@ func (me *epoll) Add(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	me.lock.Lock()
-	defer me.lock.Unlock()
-	me.connections[fd] = conn
-	if len(me.connections)%100 == 0 {
-		log.Printf("Concurrent connections: %v", len(me.connections))
-	}
+	me.Lock.Lock()
+	defer me.Lock.Unlock()
+	me.Connections[fd] = conn
 	return nil
 }
 
@@ -50,12 +46,9 @@ func (me *epoll) Remove(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	me.lock.Lock()
-	defer me.lock.Unlock()
-	delete(me.connections, fd)
-	if len(me.connections)%100 == 0 {
-		log.Printf("Concurrent connections: %v", len(me.connections))
-	}
+	me.Lock.Lock()
+	defer me.Lock.Unlock()
+	delete(me.Connections, fd)
 	return nil
 }
 
@@ -65,11 +58,11 @@ func (me *epoll) Wait() ([]net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	me.lock.RLock()
-	defer me.lock.RUnlock()
+	me.Lock.RLock()
+	defer me.Lock.RUnlock()
 	var connections []net.Conn
 	for i := 0; i < n; i++ {
-		conn := me.connections[int(events[i].Fd)]
+		conn := me.Connections[int(events[i].Fd)]
 		connections = append(connections, conn)
 	}
 	return connections, nil
