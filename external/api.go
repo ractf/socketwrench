@@ -2,7 +2,6 @@ package external
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 
@@ -36,6 +35,5 @@ func GetUser(token string) (uint32, bool) {
 	if !pres {
 		return 0, false
 	}
-	fmt.Println(id)
 	return uint32(id.(float64)), true
 }

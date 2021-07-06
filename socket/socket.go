@@ -1,11 +1,9 @@
 package socket
 
 import (
-	"encoding/json"
 	"log"
 	"sync"
 
-	"github.com/ractf/socketwrench/external"
 	"github.com/ractf/socketwrench/models"
 	"golang.org/x/net/websocket"
 )
@@ -34,17 +32,7 @@ func RunSocket(ws *websocket.Conn, id uint64, unl *sync.Mutex, msgs <-chan strin
 		select {
 		case msg := <-recv:
 			log.Printf("Received on %d: %s\n", id, msg)
-			var auth models.Auth
-			err := json.Unmarshal([]byte(msg), &auth)
-			if err == nil { // Valid packet for auth was provided
-				user, userset = external.GetUser(auth.Token)
-				if userset {
-					log.Printf("Binding socket %d to userid %d\n", id, user)
-					authme <- models.AuthMe{Id: id, Userid: user}
-				}
-			} else {
-				log.Println(err)
-			}
+
 		case sendme := <-msgs:
 			if len(sendme) > 0 {
 				log.Printf("Sending on %d: %s\n", id, sendme)
