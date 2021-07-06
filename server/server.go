@@ -17,6 +17,7 @@ import (
 )
 
 var epoller *epoll
+var authed map[uint32][]*net.Conn
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	// Upgrade connection
@@ -49,7 +50,10 @@ func Run() {
 		panic(err)
 	}
 
-	go mainHandler()
+	authed = make(map[uint32][]*net.Conn)
+
+	go recvHandler()
+	go sendHandler()
 
 	http.HandleFunc("/", wsHandler)
 	if err := http.ListenAndServe(config.WebsocketAddr, nil); err != nil {
@@ -64,9 +68,47 @@ func kill(conn net.Conn) {
 	conn.Close()
 }
 
-func mainHandler() { // must run synchronously
+func sendHandler() {
 	fromredis := external.Redis()
-	authed := make(map[uint32][]*net.Conn)
+	for msg := range fromredis {
+		packet := msg.Payload
+		log.Println("Redis message:", hex.EncodeToString([]byte(packet)))
+		switch packet[0] {
+		case 0: // Global message
+			send := []byte(packet[1:])
+			graveyard := make([]net.Conn, 0)
+			epoller.lock.RLock()
+			for _, conn := range epoller.connections {
+				err := wsutil.WriteServerText(conn, send)
+				if err != nil {
+					graveyard = append(graveyard, conn)
+				}
+			}
+			epoller.lock.RUnlock()
+			for _, grave := range graveyard {
+				kill(grave)
+			}
+
+		case 1: // user message
+			usersend := binary.BigEndian.Uint32([]byte(packet[1:5]))
+			if conns, ok := authed[usersend]; ok {
+				for ind, conn := range conns {
+					err := wsutil.WriteServerText(*conn, []byte(packet[5:]))
+					if err != nil {
+						kill(*conn)
+						authed[usersend][ind] = authed[usersend][len(authed[usersend])-1]
+						authed[usersend] = authed[usersend][:len(authed[usersend])-1]
+						if len(authed[usersend]) == 0 {
+							delete(authed, usersend)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func recvHandler() { // must run synchronously
 	for {
 		connections, err := epoller.Wait()
 		if err != nil {
@@ -80,62 +122,26 @@ func mainHandler() { // must run synchronously
 			msg, _, err := wsutil.ReadClientData(conn)
 			if err != nil {
 				kill(conn)
+				continue
+			}
+			// Valid message from a client here
+			var auth models.Auth
+			err = json.Unmarshal(msg, &auth)
+			if err == nil { // Valid packet for auth was provided
+				user, ok := external.GetUser(auth.Token)
+				if ok {
+					log.Printf("Socket %p has authenticated as %d\n", conn, user)
+					if _, ok := authed[user]; ok { // if found
+						authed[user] = append(authed[user], &conn)
+					} else {
+						authed[user] = make([]*net.Conn, 1)
+						authed[user][0] = &conn
+					}
+				}
 			} else {
-				// Valid message from a client here
-				var auth models.Auth
-				err := json.Unmarshal(msg, &auth)
-				if err == nil { // Valid packet for auth was provided
-					user, ok := external.GetUser(auth.Token)
-					if ok {
-						log.Printf("Socket %p has authenticated as %d\n", conn, user)
-						if _, ok := authed[user]; ok { // if found
-							authed[user] = append(authed[user], &conn)
-						} else {
-							authed[user] = make([]*net.Conn, 1)
-							authed[user][0] = &conn
-						}
-					}
-				} else {
-					log.Println(err)
-				}
+				log.Println(err)
 			}
-		}
-		waiting := true
-		for waiting {
-			select {
-			case msg := <-fromredis:
-				packet := msg.Payload
-				log.Println("Redis message:", hex.EncodeToString([]byte(packet)))
-				switch packet[0] {
-				case 0: // Global message
-					send := []byte(packet[1:])
-					for _, conn := range epoller.connections {
-						err := wsutil.WriteServerText(conn, send)
-						if err != nil {
-							kill(conn)
-						}
-					}
 
-				case 1: // user message
-					usersend := binary.BigEndian.Uint32([]byte(packet[1:5]))
-					if conns, ok := authed[usersend]; ok {
-						for ind, conn := range conns {
-							err := wsutil.WriteServerText(*conn, []byte(packet[5:]))
-							if err != nil {
-								kill(*conn)
-								authed[usersend][ind] = authed[usersend][len(authed[usersend])-1]
-								authed[usersend] = authed[usersend][:len(authed[usersend])-1]
-								if len(authed[usersend]) == 0 {
-									delete(authed, usersend)
-								}
-							}
-						}
-					}
-				}
-
-			default:
-				waiting = false
-			}
 		}
 	}
 }
