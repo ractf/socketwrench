@@ -22,8 +22,8 @@ func statusUpdates(cues <-chan time.Time) {
 }
 
 func main() {
-	ticker := time.NewTicker(time.Second * 4)
+	ticker := time.NewTicker(time.Second * 5)
 	go statusUpdates(ticker.C)
 
-	server.Run() // blocks
+	server.Run() // blocks forever
 }

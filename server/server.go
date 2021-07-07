@@ -66,7 +66,9 @@ func Run() {
 
 func kill(conn *net.Conn) {
 	if err := Epoller.Remove(conn); err != nil {
-		log.Printf("Failed to remove %v", err)
+		if fmt.Sprint(err) != "bad file descriptor" { // shit happens
+			log.Printf("Failed to remove %v", err)
+		}
 	}
 	(*conn).Close()
 	AuthedRev.Mu.Lock()
@@ -158,7 +160,7 @@ func recvHandler() { // must run synchronously
 				if ok {
 					authed.Mu.Lock()
 					AuthedRev.Mu.Lock()
-					log.Printf("Socket %p has authenticated as %d", conn, user)
+					//log.Printf("Socket %p has authenticated as %d", conn, user)
 					if _, found := AuthedRev.V[conn]; !found { // make sure connection already authed
 						if _, found := authed.V[user]; found { // if userid already has connections
 							authed.V[user] = append(authed.V[user], conn)
