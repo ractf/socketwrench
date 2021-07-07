@@ -8,7 +8,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"sync"
 	"syscall"
 
 	"github.com/gobwas/ws"
@@ -19,8 +18,8 @@ import (
 )
 
 var Epoller *epoll
-var authed map[uint32][]*net.Conn
-var authedmut sync.Mutex
+var authed models.SafeAuthMap
+var AuthedRev models.SafeAuthRevMap
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	// Upgrade connection
@@ -28,7 +27,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	if err := Epoller.Add(conn); err != nil {
+	if err := Epoller.Add(&conn); err != nil {
 		log.Printf("Failed to add connection %v", err)
 		conn.Close()
 	}
@@ -53,7 +52,8 @@ func Run() {
 		panic(err)
 	}
 
-	authed = make(map[uint32][]*net.Conn)
+	authed.V = make(map[uint32][]*net.Conn)
+	AuthedRev.V = make(map[*net.Conn]uint32)
 
 	go recvHandler()
 	go sendHandler()
@@ -64,11 +64,35 @@ func Run() {
 	}
 }
 
-func kill(conn net.Conn) {
+func kill(conn *net.Conn) {
 	if err := Epoller.Remove(conn); err != nil {
 		log.Printf("Failed to remove %v", err)
 	}
-	conn.Close()
+	(*conn).Close()
+	AuthedRev.Mu.Lock()
+	if uid, ok := AuthedRev.V[conn]; ok {
+		delete(AuthedRev.V, conn)
+
+		authed.Mu.Lock()
+		if conns, found := authed.V[uid]; found {
+			delind := -1
+			for ind, val := range conns {
+				if val == conn {
+					delind = ind
+					break
+				}
+			}
+			if delind > -1 {
+				conns[delind] = conns[len(conns)-1]
+				conns = conns[:len(conns)-1]
+			}
+			if len(conns) == 0 {
+				delete(authed.V, uid)
+			}
+		}
+		authed.Mu.Unlock()
+	}
+	AuthedRev.Mu.Unlock()
 }
 
 func sendHandler() {
@@ -76,39 +100,34 @@ func sendHandler() {
 	for msg := range fromredis {
 		packet := msg.Payload
 		log.Println("Redis message:", hex.EncodeToString([]byte(packet)))
+		graveyard := make([]*net.Conn, 0)
 		switch packet[0] {
 		case 0: // Global message
 			send := []byte(packet[1:])
-			graveyard := make([]net.Conn, 0)
 			Epoller.Lock.RLock()
 			for _, conn := range Epoller.Connections {
-				err := wsutil.WriteServerText(conn, send)
+				err := wsutil.WriteServerText(*conn, send)
 				if err != nil {
 					graveyard = append(graveyard, conn)
 				}
 			}
 			Epoller.Lock.RUnlock()
-			for _, grave := range graveyard {
-				kill(grave)
-			}
 
 		case 1: // user message
 			usersend := binary.BigEndian.Uint32([]byte(packet[1:5]))
-			authedmut.Lock()
-			if conns, ok := authed[usersend]; ok {
-				for ind, conn := range conns {
+			authed.Mu.Lock()
+			if conns, ok := authed.V[usersend]; ok {
+				for _, conn := range conns {
 					err := wsutil.WriteServerText(*conn, []byte(packet[5:]))
 					if err != nil {
-						kill(*conn)
-						authed[usersend][ind] = authed[usersend][len(authed[usersend])-1]
-						authed[usersend] = authed[usersend][:len(authed[usersend])-1]
-						if len(authed[usersend]) == 0 {
-							delete(authed, usersend)
-						}
+						graveyard = append(graveyard, conn)
 					}
 				}
 			}
-			authedmut.Unlock()
+			authed.Mu.Unlock()
+		}
+		for _, grave := range graveyard {
+			kill(grave)
 		}
 	}
 }
@@ -126,7 +145,7 @@ func recvHandler() { // must run synchronously
 			if conn == nil {
 				break
 			}
-			msg, _, err := wsutil.ReadClientData(conn)
+			msg, _, err := wsutil.ReadClientData(*conn)
 			if err != nil {
 				kill(conn)
 				continue
@@ -137,20 +156,24 @@ func recvHandler() { // must run synchronously
 			if err == nil { // Valid packet for auth was provided
 				user, ok := external.GetUser(auth.Token)
 				if ok {
-					log.Printf("Socket %p has authenticated as %d\n", conn, user)
-					authedmut.Lock()
-					if _, ok := authed[user]; ok { // if found
-						authed[user] = append(authed[user], &conn)
-					} else {
-						authed[user] = make([]*net.Conn, 1)
-						authed[user][0] = &conn
+					authed.Mu.Lock()
+					AuthedRev.Mu.Lock()
+					log.Printf("Socket %p has authenticated as %d", conn, user)
+					if _, found := AuthedRev.V[conn]; !found { // make sure connection already authed
+						if _, found := authed.V[user]; found { // if userid already has connections
+							authed.V[user] = append(authed.V[user], conn)
+						} else {
+							authed.V[user] = make([]*net.Conn, 1)
+							authed.V[user][0] = conn
+						}
+						AuthedRev.V[conn] = user
 					}
-					authedmut.Unlock()
+					AuthedRev.Mu.Unlock()
+					authed.Mu.Unlock()
 				}
 			} else {
 				log.Println(err)
 			}
-
 		}
 	}
 }

@@ -11,7 +11,7 @@ import (
 
 type epoll struct {
 	fd          int
-	Connections map[int]net.Conn
+	Connections map[int]*net.Conn
 	Lock        *sync.RWMutex
 }
 
@@ -23,11 +23,11 @@ func MkEpoll() (*epoll, error) {
 	return &epoll{
 		fd:          fd,
 		Lock:        &sync.RWMutex{},
-		Connections: make(map[int]net.Conn),
+		Connections: make(map[int]*net.Conn),
 	}, nil
 }
 
-func (me *epoll) Add(conn net.Conn) error {
+func (me *epoll) Add(conn *net.Conn) error {
 	// Extract file descriptor associated with the connection
 	fd := websocketFD(conn)
 	err := unix.EpollCtl(me.fd, syscall.EPOLL_CTL_ADD, fd, &unix.EpollEvent{Events: unix.POLLIN | unix.POLLHUP, Fd: int32(fd)})
@@ -35,24 +35,24 @@ func (me *epoll) Add(conn net.Conn) error {
 		return err
 	}
 	me.Lock.Lock()
-	defer me.Lock.Unlock()
 	me.Connections[fd] = conn
+	me.Lock.Unlock()
 	return nil
 }
 
-func (me *epoll) Remove(conn net.Conn) error {
+func (me *epoll) Remove(conn *net.Conn) error {
 	fd := websocketFD(conn)
 	err := unix.EpollCtl(me.fd, syscall.EPOLL_CTL_DEL, fd, nil)
 	if err != nil {
 		return err
 	}
 	me.Lock.Lock()
-	defer me.Lock.Unlock()
 	delete(me.Connections, fd)
+	me.Lock.Unlock()
 	return nil
 }
 
-func (me *epoll) Wait() ([]net.Conn, error) {
+func (me *epoll) Wait() ([]*net.Conn, error) {
 	events := make([]unix.EpollEvent, 100)
 	n, err := unix.EpollWait(me.fd, events, 100)
 	if err != nil {
@@ -60,7 +60,7 @@ func (me *epoll) Wait() ([]net.Conn, error) {
 	}
 	me.Lock.RLock()
 	defer me.Lock.RUnlock()
-	var connections []net.Conn
+	var connections []*net.Conn
 	for i := 0; i < n; i++ {
 		conn := me.Connections[int(events[i].Fd)]
 		connections = append(connections, conn)
@@ -68,8 +68,8 @@ func (me *epoll) Wait() ([]net.Conn, error) {
 	return connections, nil
 }
 
-func websocketFD(conn net.Conn) int {
-	tcpConn := reflect.Indirect(reflect.ValueOf(conn)).FieldByName("conn")
+func websocketFD(conn *net.Conn) int {
+	tcpConn := reflect.Indirect(reflect.ValueOf(*conn)).FieldByName("conn")
 	fdVal := tcpConn.FieldByName("fd")
 	pfdVal := reflect.Indirect(fdVal).FieldByName("pfd")
 
