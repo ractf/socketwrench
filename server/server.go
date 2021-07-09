@@ -8,20 +8,20 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"syscall"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
-	"github.com/ractf/socketwrench/config"
 	"github.com/ractf/socketwrench/external"
 	"github.com/ractf/socketwrench/models"
 )
 
-var Epoller *epoll
+var Epoller *models.Epoll
+var toredis chan []byte
 var authed models.SafeAuthMap
 var AuthedRev models.SafeAuthRevMap
+var AuthReqs models.SafeReqMap
 
-func wsHandler(w http.ResponseWriter, r *http.Request) {
+func WsHandler(w http.ResponseWriter, r *http.Request) {
 	// Upgrade connection
 	conn, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
@@ -34,34 +34,23 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func Run() {
-	log.Printf("Starting up")
-	// Increase resources limitations
-	var rLimit syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-		panic(err)
-	}
-	rLimit.Cur = rLimit.Max
-	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-		panic(err)
-	}
-
 	// Start epoll
 	var err error
-	Epoller, err = MkEpoll()
+	Epoller, err = models.MkEpoll()
 	if err != nil {
 		panic(err)
 	}
 
+	external.Setup()
+	go external.SendOn(toredis)
+
 	authed.V = make(map[uint32][]*net.Conn)
 	AuthedRev.V = make(map[*net.Conn]uint32)
+	AuthReqs.V = make(map[string]*net.Conn)
 
 	go recvHandler()
 	go sendHandler()
-
-	http.HandleFunc("/", wsHandler)
-	if err := http.ListenAndServe(config.WebsocketAddr, nil); err != nil {
-		log.Fatal(err)
-	}
+	log.Println("socketwrench ready to go.")
 }
 
 func kill(conn *net.Conn) {
@@ -98,7 +87,7 @@ func kill(conn *net.Conn) {
 }
 
 func sendHandler() {
-	fromredis := external.Redis()
+	fromredis := external.GetRecv()
 	for msg := range fromredis {
 		packet := msg.Payload
 		log.Println("Redis message:", hex.EncodeToString([]byte(packet)))
@@ -127,6 +116,34 @@ func sendHandler() {
 				}
 			}
 			authed.Mu.Unlock()
+
+		case 2: // auth failed
+			AuthReqs.Mu.Lock()
+			delete(AuthReqs.V, packet[1:])
+			AuthReqs.Mu.Unlock()
+
+		case 3: // auth success
+			uid := binary.BigEndian.Uint32([]byte(packet[1:5]))
+			AuthReqs.Mu.Lock()
+			conn, ok := AuthReqs.V[packet[5:]]
+			delete(AuthReqs.V, packet[5:])
+			AuthReqs.Mu.Unlock()
+			if ok {
+				authed.Mu.Lock()
+				AuthedRev.Mu.Lock()
+				//log.Printf("Socket %p has authenticated as %d", conn, user)
+				if _, found := AuthedRev.V[conn]; !found { // make sure connection already authed
+					if _, found := authed.V[uid]; found { // if userid already has connections
+						authed.V[uid] = append(authed.V[uid], conn)
+					} else {
+						authed.V[uid] = make([]*net.Conn, 1)
+						authed.V[uid][0] = conn
+					}
+					AuthedRev.V[conn] = uid
+				}
+				AuthedRev.Mu.Unlock()
+				authed.Mu.Unlock()
+			}
 		}
 		for _, grave := range graveyard {
 			kill(grave)
@@ -134,7 +151,7 @@ func sendHandler() {
 	}
 }
 
-func recvHandler() { // must run synchronously
+func recvHandler() {
 	for {
 		connections, err := Epoller.Wait()
 		if err != nil {
@@ -147,6 +164,9 @@ func recvHandler() { // must run synchronously
 			if conn == nil {
 				break
 			}
+			if *conn == nil {
+				break
+			}
 			msg, _, err := wsutil.ReadClientData(*conn)
 			if err != nil {
 				kill(conn)
@@ -156,23 +176,14 @@ func recvHandler() { // must run synchronously
 			var auth models.Auth
 			err = json.Unmarshal(msg, &auth)
 			if err == nil { // Valid packet for auth was provided
-				user, ok := external.GetUser(auth.Token)
-				if ok {
-					authed.Mu.Lock()
-					AuthedRev.Mu.Lock()
-					//log.Printf("Socket %p has authenticated as %d", conn, user)
-					if _, found := AuthedRev.V[conn]; !found { // make sure connection already authed
-						if _, found := authed.V[user]; found { // if userid already has connections
-							authed.V[user] = append(authed.V[user], conn)
-						} else {
-							authed.V[user] = make([]*net.Conn, 1)
-							authed.V[user][0] = conn
-						}
-						AuthedRev.V[conn] = user
-					}
-					AuthedRev.Mu.Unlock()
-					authed.Mu.Unlock()
-				}
+				packet := make([]byte, 0, 40)
+				packet = append(packet, 128)
+				packet = append(packet, auth.Token...)
+				toredis <- packet
+				AuthReqs.Mu.Lock()
+				AuthReqs.V[auth.Token] = conn
+				AuthReqs.Mu.Unlock()
+
 			} else {
 				log.Println(err)
 			}

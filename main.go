@@ -2,28 +2,65 @@ package main
 
 import (
 	"log"
-	"runtime"
+	"net/http"
+	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/ractf/socketwrench/config"
 	"github.com/ractf/socketwrench/server"
 )
 
-func statusUpdates(cues <-chan time.Time) {
+var concurConnections = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "socketwrench_concurrent_connections",
+	Help: "The number of websockets currently connected",
+})
+var concurAuthed = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "socketwrench_concurrent_authed_connections",
+	Help: "The number of websockets currently connected and authenticated",
+})
+var authedQueue = promauto.NewGauge(prometheus.GaugeOpts{
+	Name: "socketwrench_auth_queue",
+	Help: "The number of authentication requests waiting on backend",
+})
+
+func stats(cues <-chan time.Time) {
 	for range cues {
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
 		server.Epoller.Lock.RLock()
-		server.AuthedRev.Mu.Lock()
-		log.Printf("Goroutines = %d   Alloc = %dKiB   GCs = %d   Conns = %d   Authed = %d",
-			runtime.NumGoroutine(), m.Alloc/1024, m.NumGC, len(server.Epoller.Connections), len(server.AuthedRev.V))
-		server.AuthedRev.Mu.Unlock()
+		concurConnections.Set(float64(len(server.Epoller.Connections)))
 		server.Epoller.Lock.RUnlock()
+		server.AuthedRev.Mu.Lock()
+		concurAuthed.Set(float64(len(server.AuthedRev.V)))
+		server.AuthedRev.Mu.Unlock()
+		server.AuthReqs.Mu.Lock()
+		authedQueue.Set(float64(len(server.AuthReqs.V)))
+		server.AuthReqs.Mu.Unlock()
+
 	}
+
 }
 
 func main() {
-	ticker := time.NewTicker(time.Second * 5)
-	go statusUpdates(ticker.C)
+	log.Println("socketwrench starting up...")
+	// Increase resources limitations
+	var rLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+		panic(err)
+	}
+	rLimit.Cur = rLimit.Max
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+		panic(err)
+	}
 
-	server.Run() // blocks forever
+	go server.Run()
+	ticker := time.NewTicker(time.Second * 10)
+	go stats(ticker.C)
+
+	http.Handle("/metrics", promhttp.Handler())
+	http.HandleFunc("/", server.WsHandler)
+	if err := http.ListenAndServe(config.MyAddr, nil); err != nil {
+		log.Fatal(err)
+	}
 }

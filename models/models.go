@@ -15,12 +15,11 @@ type SafeAuthRevMap struct {
 	Mu sync.Mutex
 }
 
-type Auth struct {
-	Token string `json:"token"`
+type SafeReqMap struct {
+	V  map[string]*net.Conn
+	Mu sync.Mutex
 }
 
-type MemberResponse struct {
-	S bool                   `json:"s"`
-	D map[string]interface{} `json:"d"`
-	M string                 `json:"m"`
+type Auth struct {
+	Token string `json:"token"`
 }

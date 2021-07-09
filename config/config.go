@@ -2,7 +2,7 @@ package config
 
 import "os"
 
-var RedisAddr, RedisSub, WebsocketAddr, BackendAddr string
+var RedisAddr, RedisSub, MyAddr, BackendAddr string
 
 func init() {
 	var ok bool
@@ -14,9 +14,9 @@ func init() {
 	if !ok {
 		panic("Missing env var REDIS_SUB")
 	}
-	WebsocketAddr, ok = os.LookupEnv("WEBSOCKET_ADDR") // where to host the http upgrade handler, passed to http.ListenAndServe
+	MyAddr, ok = os.LookupEnv("MY_ADDR") // where to host the http upgrade handler and metrics, passed to http.ListenAndServe
 	if !ok {
-		panic("Missing env var WEBSOCKET_ADDR")
+		panic("Missing env var MY_ADDR")
 	}
 	BackendAddr, ok = os.LookupEnv("BACKEND_ADDR") // where is backend, passed to http.NewRequest, should not end in /
 	if !ok {
