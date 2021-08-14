@@ -3,7 +3,7 @@ Pub/Sub of configurable name. Every message sent over this Pub/Sub begins with o
 interpreted as a uint8, for the packet identifier. Core should ignore packets with an ID less than
 128, and SW will ignore packets with an ID greater or equal to 128.
 
-## messages to SW from core
+## messages to core to SW
 
 ID `0` = `0x00`: Global message to all connected websockets. SW will send the remaining contents of the packet to all connected websockets.
 
